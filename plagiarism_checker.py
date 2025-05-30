@@ -5,15 +5,19 @@ import time
 from urllib.parse import quote
 from cachetools import TTLCache
 import logging
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Google Custom Search API credentials
-GOOGLE_API_KEY = "AIzaSyDlYc3Xr4ACMC84dhsMbcnYhYOkKpLYeTI"
-CX = "93051f88ddbba497c"
 
+# Google Custom Search API credentials from environment
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+CX = os.getenv("CX")
 
 # Cache to store search results (TTL: 1 hour)
 cache = TTLCache(maxsize=1000, ttl=3600)
@@ -120,8 +124,6 @@ def pseudo_plagiarism_estimate(sentence):
 
 
 
-#  Google Custom Search API credentials
-# GOOGLE_API_KEY = "AIzaSyDkpVGsBzW8u6SXuAzpuwVLIMdvuYjcwpo"
-# CX = "13472556e5ab949ba"
+
 
 
