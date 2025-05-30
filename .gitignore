@@ -62,3 +62,7 @@ runs/
 
 # === Custom app files (if any) ===
 /instance/
+
+
+# firebase key
+scholarauxil-1a121-firebase-adminsdk-fbsvc-820968ef4f.json

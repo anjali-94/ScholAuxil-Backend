@@ -9,7 +9,11 @@ import json
 from werkzeug.utils import secure_filename
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
+import firebase_admin
+from firebase_admin import credentials, auth as firebase_auth
+from utils.auth_utils import firebase_auth_required
 import traceback
+from flask import g
 import requests
 from plagiarism_checker import check_plagiarism 
 from utils.file_extractor import extract_text_from_pdf, extract_text_from_docx, extract_text_from_image, allowed_file
@@ -38,6 +42,10 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 db = SQLAlchemy(app)
 
+# Initialize Firebase Admin SDK
+cred = credentials.Certificate("./scholarauxil-1a121-firebase-adminsdk-fbsvc-820968ef4f.json")
+firebase_admin.initialize_app(cred)
+
 BIBIFY_API_BASE = 'https://api.bibify.org'
 @app.route('/')
 def home():
@@ -47,8 +55,9 @@ def home():
 # --- Database Models ---
 class Repository(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False, unique=True)
+    name = db.Column(db.String(100), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.String(128), nullable=False)
     papers = db.relationship('Paper', backref='repository', lazy=True, cascade="all, delete-orphan")
 
     def to_dict(self):
@@ -56,6 +65,7 @@ class Repository(db.Model):
             'id': self.id,
             'name': self.name,
             'created_at': self.created_at.isoformat(),
+            'user_id': self.user_id,
             'papers': [paper.to_dict() for paper in self.papers] if self.papers else []
         }
 
@@ -200,6 +210,7 @@ def upload_file():
         return jsonify({'error': 'File type not allowed'}), 400
 
 
+
 @app.route('/plagiarism/check', methods=['POST'])
 def plagiarism_check():
     try:
@@ -217,79 +228,83 @@ def plagiarism_check():
 
         # Read the file content based on the file type
         file_ext = file.filename.rsplit('.', 1)[1].lower()
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
-        file.save(file_path)
 
         if file_ext == 'pdf':
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
+            file.save(file_path)
             file_content = extract_text_from_pdf(file_path)
+            os.remove(file_path)
+
         elif file_ext == 'docx':
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
+            file.save(file_path)
             file_content = extract_text_from_docx(file_path)
+            os.remove(file_path)
+
         elif file_ext in {'png', 'jpg', 'jpeg'}:
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
+            file.save(file_path)
             file_content = extract_text_from_image(file_path)
+            os.remove(file_path)
+
         else:
             file_content = file.read().decode('utf-8', errors='ignore')
 
-        os.remove(file_path)
+        plagiarism_percentage = check_plagiarism(file_content)
 
-        # Perform plagiarism check
-        result = check_plagiarism(file_content)
-        plagiarism_percentage = result["plagiarism_percentage"]
-        results = result["results"]
-
-        # Format response with colored text (for HTML rendering)
-        formatted_results = []
-        for res in results:
-            sentence = res["sentence"]
-            color = res["color"]
-            source = res["source"]
-            formatted_sentence = f'<span style="color:{color}">{sentence}</span>'
-            if source:
-                formatted_sentence += f' <a href="{source}" target="_blank">(Source)</a>'
-            formatted_results.append(formatted_sentence)
-
-        return jsonify({
-            "plagiarism_percentage": plagiarism_percentage,
-            "results": formatted_results,
-            "message": "Plagiarism check complete."
-        })
+        return jsonify({"plagiarism_percentage": plagiarism_percentage, "result": "Plagiarism check complete."})
 
     except Exception as e:
-        logger.error(f"Error in plagiarism check: {str(e)}")
         return jsonify({"error": str(e)}), 500
     
 @app.route('/api/repositories', methods=['GET'])
+@firebase_auth_required
 def get_repositories():
     """Returns all repositories as JSON."""
-    repositories = Repository.query.order_by(Repository.created_at.desc()).all()
+    user_id = g.user_id
+    repositories = Repository.query.filter_by(user_id=user_id).order_by(Repository.created_at.desc()).all()
     return jsonify([repo.to_dict() for repo in repositories])
 
-@app.route('/api/repository/new', methods=['GET','POST'])
+@app.route('/api/repository/new', methods=['POST'])
+@firebase_auth_required
 def create_repository():
     """Handles creation of a new repository via API."""
+    if not request.is_json:
+        return jsonify({'error': 'Content-Type must be application/json'}), 400
+
     data = request.get_json()
-    print("Received JSON data:", data)
-    if not data or 'name' not in data:
-        return jsonify({'error': 'Repository name is required'}), 400
-    
-    repo_name = data['name'].strip()
+    logging.info("Received JSON data: %s", data)
+
+    repo_name = str(data.get('name', '')).strip()
     if not repo_name:
-        return jsonify({'error': 'Repository name cannot be empty'}), 400
-    
-    if Repository.query.filter_by(name=repo_name).first():
+        return jsonify({'error': 'Repository name is required and cannot be empty'}), 400
+
+    user_id = g.user_id  # Assuming this comes from your firebase_auth_required
+
+    existing_repo = Repository.query.filter_by(name=repo_name, user_id=user_id).first()
+    if existing_repo:
         return jsonify({'error': 'Repository with this name already exists'}), 409
-    
-    new_repo = Repository(name=repo_name)
+
+    new_repo = Repository(name=repo_name, user_id=user_id)
     db.session.add(new_repo)
     db.session.commit()
+
     return jsonify(new_repo.to_dict()), 201
 
 @app.route('/api/repository/<int:repo_id>', methods=['GET'])
+@firebase_auth_required
 def get_repository(repo_id):
     """Returns a specific repository with its papers as JSON."""
     repo = Repository.query.get_or_404(repo_id)
     return jsonify(repo.to_dict())
 
+@app.route('/api/repository/<int:repo_id>/papers', methods=['POST'])
+@firebase_auth_required
+def upload_paper_to_repository(repo_id):
+    return api_upload_paper(repo_id)
+
 @app.route('/api/repository/<int:repo_id>/delete', methods=['POST','DELETE'])
+@firebase_auth_required
 def api_delete_repository(repo_id):
     """Deletes a repository and all its papers via API."""
     repo = Repository.query.get_or_404(repo_id)
@@ -297,7 +312,8 @@ def api_delete_repository(repo_id):
     db.session.commit()
     return jsonify({'message': f'Repository "{repo.name}" and all its papers deleted successfully'}), 200
 
-@app.route('/api/paper/upload/<int:repo_id>', methods=['POST','GET'])
+@app.route('/api/paper/upload/<int:repo_id>', methods=['POST'])
+@firebase_auth_required
 def api_upload_paper(repo_id):
     """Handles uploading a new paper to a specific repository via API."""
     repo = Repository.query.get_or_404(repo_id)
@@ -338,6 +354,7 @@ def api_upload_paper(repo_id):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/paper/<int:paper_id>', methods=['PUT', 'POST', 'GET'])
+@firebase_auth_required
 def api_paper_detail(paper_id):
     """Handles paper details via API."""
     paper = Paper.query.get_or_404(paper_id)
@@ -362,6 +379,7 @@ def api_paper_detail(paper_id):
         return jsonify(paper.to_dict())
 
 @app.route('/api/paper/<int:paper_id>/delete', methods=['DELETE', 'POST'])
+@firebase_auth_required
 def api_delete_paper(paper_id):
     """Deletes a specific paper via API."""
     paper = Paper.query.get_or_404(paper_id)
@@ -502,10 +520,60 @@ def get_citation_fields(media_type):
 @app.route('/health')
 def health_check():
     return jsonify({'status': 'healthy', 'service': 'bibify-proxy'})
-    
+
+# Add this to app.py
+@app.route('/api/repository/<int:repo_id>', methods=['DELETE'])
+@firebase_auth_required
+def delete_repository(repo_id):
+    repo = Repository.query.get_or_404(repo_id)
+    if repo.user_id != g.user_id:
+        return jsonify({'error': 'Unauthorized access to repository'}), 403
+    db.session.delete(repo)
+    db.session.commit()
+    return jsonify({'message': f'Repository "{repo.name}" deleted'}), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
