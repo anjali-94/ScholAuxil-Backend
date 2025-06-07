@@ -213,18 +213,10 @@ def upload_file():
 @app.route('/api/check-plagiarism', methods=['POST'])
 def check_plagiarism():
     data = request.get_json()
-    text = data.get('text', '').strip()
+    text = data.get('text', '')
 
     if not text:
-        return jsonify({"error": "Text is required for plagiarism checking."}), 400
-
-    text_length = len(text)
-
-    if text_length < 100:
-        return jsonify({"error": f"Text is too short. Minimum 100 characters required (current: {text_length})."}), 400
-
-    if text_length > 120000:
-        return jsonify({"error": f"Text is too long. Maximum 120,000 characters allowed (current: {text_length})."}), 400
+        return jsonify({"error": "Text is required"}), 400
 
     payload = {
         "text": text,
@@ -241,7 +233,7 @@ def check_plagiarism():
         response = requests.post(API_URL, json=payload, headers=headers)
         return jsonify(response.json()), response.status_code
     except Exception as e:
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/repositories', methods=['GET'])
@@ -521,7 +513,6 @@ def delete_repository(repo_id):
 
 if __name__ == '__main__':
     app.run(debug=True)
-
 
 
 
