@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request, render_template, redirect, url_for, send_from_directory
 from flask_cors import CORS
+import requests
 import os
 import PyPDF2
 import fitz
@@ -14,8 +15,6 @@ from firebase_admin import credentials, auth as firebase_auth
 from utils.auth_utils import firebase_auth_required
 import traceback
 from flask import g
-import requests
-from plagiarism_checker import check_plagiarism 
 from utils.file_extractor import extract_text_from_pdf, extract_text_from_docx, extract_text_from_image, allowed_file
 from dotenv import load_dotenv
 load_dotenv()
@@ -33,6 +32,8 @@ CORS(app)
 # CORS(app,origins=["http://localhost:5173"]) 
 
 API_KEY = os.getenv("OPENROUTER_API_KEY")
+PLAGIARISM_CHECK_API_KEY = os.getenv("PLAGIARISM_API_KEY")
+API_URL = "https://api.gowinston.ai/v2/plagiarism"
 app.config['SECRET_KEY'] = os.environ['FLASK_SECRET_KEY']
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(BASE_DIR, 'instance', 'research_repo.db')
@@ -209,54 +210,40 @@ def upload_file():
     else:
         return jsonify({'error': 'File type not allowed'}), 400
 
+@app.route('/api/check-plagiarism', methods=['POST'])
+def check_plagiarism():
+    data = request.get_json()
+    text = data.get('text', '').strip()
 
+    if not text:
+        return jsonify({"error": "Text is required for plagiarism checking."}), 400
 
-@app.route('/plagiarism/check', methods=['POST'])
-def plagiarism_check():
+    text_length = len(text)
+
+    if text_length < 100:
+        return jsonify({"error": f"Text is too short. Minimum 100 characters required (current: {text_length})."}), 400
+
+    if text_length > 120000:
+        return jsonify({"error": f"Text is too long. Maximum 120,000 characters allowed (current: {text_length})."}), 400
+
+    payload = {
+        "text": text,
+        "language": "en",
+        "country": "us"
+    }
+
+    headers = {
+        "Authorization": f"Bearer {PLAGIARISM_CHECK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     try:
-        # Verify API key for security
-        if request.headers.get("x-api-key") != "5cb483dc-18ee-4861-8036-b746ea79d8e5":
-            return jsonify({"error": "Unauthorized"}), 401
-
-        # Check if file is uploaded
-        if 'file' not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
-
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
-
-        # Read the file content based on the file type
-        file_ext = file.filename.rsplit('.', 1)[1].lower()
-
-        if file_ext == 'pdf':
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
-            file.save(file_path)
-            file_content = extract_text_from_pdf(file_path)
-            os.remove(file_path)
-
-        elif file_ext == 'docx':
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
-            file.save(file_path)
-            file_content = extract_text_from_docx(file_path)
-            os.remove(file_path)
-
-        elif file_ext in {'png', 'jpg', 'jpeg'}:
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
-            file.save(file_path)
-            file_content = extract_text_from_image(file_path)
-            os.remove(file_path)
-
-        else:
-            file_content = file.read().decode('utf-8', errors='ignore')
-
-        plagiarism_percentage = check_plagiarism(file_content)
-
-        return jsonify({"plagiarism_percentage": plagiarism_percentage, "result": "Plagiarism check complete."})
-
+        response = requests.post(API_URL, json=payload, headers=headers)
+        return jsonify(response.json()), response.status_code
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/repositories', methods=['GET'])
 @firebase_auth_required
 def get_repositories():
@@ -534,6 +521,11 @@ def delete_repository(repo_id):
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+
+
+
+
 
 
 
